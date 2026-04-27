@@ -9,6 +9,8 @@
 //! For clarity, each single syscall is implemented as its own function, named
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
+use crate::config::MAX_SYSCALL_NUM;
+use crate::task::with_current_task_mut;
 const SYSCALL_WRITE: usize = 64;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
@@ -31,8 +33,27 @@ mod process;
 use fs::*;
 use process::*;
 
+/// Record one syscall invocation.
+pub(crate) fn record_syscall(syscall_id: usize) {
+    if syscall_id < MAX_SYSCALL_NUM {
+        with_current_task_mut(|task| {
+            task.syscall_count[syscall_id] += 1;
+        });
+    }
+}
+
+/// Get the recorded count for a syscall id.
+pub(crate) fn syscall_count(syscall_id: usize) -> Option<usize> {
+    if syscall_id < MAX_SYSCALL_NUM {
+        Some(with_current_task_mut(|task| task.syscall_count[syscall_id]))
+    } else {
+        None
+    }
+}
+
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    record_syscall(syscall_id);
     match syscall_id {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),

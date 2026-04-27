@@ -37,6 +37,7 @@ lazy_static! {
 pub struct MemorySet {
     page_table: PageTable,
     areas: Vec<MapArea>,
+    mmap_areas: Vec<MapArea>,
 }
 
 impl MemorySet {
@@ -45,6 +46,7 @@ impl MemorySet {
         Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
+            mmap_areas: Vec::new(),
         }
     }
     /// Get the page table token
@@ -233,6 +235,69 @@ impl MemorySet {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
     }
+
+    /// Map an anonymous framed area for `mmap`.
+    pub(crate) fn mmap(
+        &mut self,
+        start_va: VirtAddr,
+        len: usize,
+        permission: MapPermission,
+    ) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let end_va = match start_va.0.checked_add(len) {
+            Some(end) => VirtAddr(end),
+            None => return false,
+        };
+        let mut map_area = MapArea::new(start_va, end_va, MapType::Framed, permission);
+        let vpn_range = map_area.vpn_range;
+        if vpn_range
+            .into_iter()
+            .any(|vpn| self.page_table.translate(vpn).map_or(false, |pte| pte.is_valid()))
+        {
+            return false;
+        }
+        let page_count = vpn_range.into_iter().count();
+        let mut frames = Vec::with_capacity(page_count);
+        for _ in 0..page_count {
+            if let Some(frame) = frame_alloc() {
+                frames.push(frame);
+            } else {
+                return false;
+            }
+        }
+        let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
+        for (vpn, frame) in vpn_range.into_iter().zip(frames.into_iter()) {
+            self.page_table.map(vpn, frame.ppn, pte_flags);
+            map_area.data_frames.insert(vpn, frame);
+        }
+        self.mmap_areas.push(map_area);
+        true
+    }
+
+    /// Unmap an anonymous framed area previously created by `mmap`.
+    pub(crate) fn munmap(&mut self, start_va: VirtAddr, len: usize) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let end_va = match start_va.0.checked_add(len) {
+            Some(end) => VirtAddr(end),
+            None => return false,
+        };
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        if let Some(idx) = self.mmap_areas.iter().position(|area| {
+            area.vpn_range.get_start() == start_vpn && area.vpn_range.get_end() == end_vpn
+        }) {
+            let mut area = self.mmap_areas.remove(idx);
+            area.unmap(&mut self.page_table);
+            true
+        } else {
+            false
+        }
+    }
+
     /// shrink the area to new_end
     #[allow(unused)]
     pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {

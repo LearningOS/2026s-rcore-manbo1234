@@ -133,6 +133,16 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Apply a mutable closure to the current running task.
+    pub(crate) fn with_current_task_mut<R>(
+        &self,
+        f: impl FnOnce(&mut TaskControlBlock) -> R,
+    ) -> R {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        f(&mut inner.tasks[cur])
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -201,4 +211,11 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Apply a mutable closure to the current running task.
+pub(crate) fn with_current_task_mut<R>(
+    f: impl FnOnce(&mut TaskControlBlock) -> R,
+) -> R {
+    TASK_MANAGER.with_current_task_mut(f)
 }
