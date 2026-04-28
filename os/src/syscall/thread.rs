@@ -99,6 +99,9 @@ pub fn sys_waittid(tid: usize) -> i32 {
     if task_inner.res.as_ref().unwrap().tid == tid {
         return -1;
     }
+    if tid >= process_inner.tasks.len() {
+        return -1;
+    }
     let mut exit_code: Option<i32> = None;
     let waited_task = process_inner.tasks[tid].as_ref();
     if let Some(waited_task) = waited_task {

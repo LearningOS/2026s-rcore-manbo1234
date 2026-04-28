@@ -7,11 +7,13 @@ use alloc::vec::Vec;
 use bitflags::*;
 use easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
+use core::any::Any;
 
 /// inode in memory
 pub struct OSInode {
     readable: bool,
     writable: bool,
+    inode_id: u32,
     inner: UPSafeCell<OSInodeInner>,
 }
 /// inner of inode in memory
@@ -22,13 +24,18 @@ pub struct OSInodeInner {
 
 impl OSInode {
     /// create a new inode in memory
-    pub fn new(readable: bool, writable: bool, inode: Arc<Inode>) -> Self {
+    pub fn new(readable: bool, writable: bool, inode_id: u32, inode: Arc<Inode>) -> Self {
         trace!("kernel: OSInode::new");
         Self {
             readable,
             writable,
+            inode_id,
             inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
         }
+    }
+    /// inode id of the underlying file.
+    pub fn inode_id(&self) -> u32 {
+        self.inode_id
     }
     /// read all data from the inode in memory
     pub fn read_all(&self) -> Vec<u8> {
@@ -102,20 +109,25 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     if flags.contains(OpenFlags::CREATE) {
         if let Some(inode) = ROOT_INODE.find(name) {
             // clear size
+            let inode_id = inode.inode_id();
             inode.clear();
-            Some(Arc::new(OSInode::new(readable, writable, inode)))
+            Some(Arc::new(OSInode::new(readable, writable, inode_id, inode)))
         } else {
             // create file
             ROOT_INODE
                 .create(name)
-                .map(|inode| Arc::new(OSInode::new(readable, writable, inode)))
+                .map(|inode| {
+                    let inode_id = inode.inode_id();
+                    Arc::new(OSInode::new(readable, writable, inode_id, inode))
+                })
         }
     } else {
         ROOT_INODE.find(name).map(|inode| {
+            let inode_id = inode.inode_id();
             if flags.contains(OpenFlags::TRUNC) {
                 inode.clear();
             }
-            Arc::new(OSInode::new(readable, writable, inode))
+            Arc::new(OSInode::new(readable, writable, inode_id, inode))
         })
     }
 }
@@ -156,5 +168,8 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

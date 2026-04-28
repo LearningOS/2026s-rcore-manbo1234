@@ -6,7 +6,7 @@ use super::TaskControlBlock;
 use super::{add_task, SignalFlags};
 use super::{pid_alloc, PidHandle};
 use crate::fs::{File, Stdin, Stdout};
-use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
+use crate::mm::{translated_byte_buffer, translated_refmut, MemorySet, KERNEL_SPACE};
 use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::string::String;
@@ -14,6 +14,19 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+
+fn write_user_value<T>(token: usize, dst: *mut T, value: &T) {
+    let size = core::mem::size_of::<T>();
+    let src = unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size) };
+    let mut user_buf = translated_byte_buffer(token, dst as *const u8, size);
+    let mut offset = 0usize;
+    for slice in user_buf.iter_mut() {
+        let len = slice.len();
+        slice.copy_from_slice(&src[offset..offset + len]);
+        offset += len;
+    }
+    assert_eq!(offset, size);
+}
 
 /// Process Control Block
 pub struct ProcessControlBlock {
@@ -39,6 +52,8 @@ pub struct ProcessControlBlockInner {
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
     /// signal flags
     pub signals: SignalFlags,
+    /// deadlock detection enabled?
+    deadlock_detect: bool,
     /// tasks(also known as threads)
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     /// task resource allocator
@@ -82,6 +97,143 @@ impl ProcessControlBlockInner {
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
     }
+
+    fn waiting_mutex_of(&self, tid: usize) -> Option<usize> {
+        self.mutex_list.iter().enumerate().find_map(|(id, mutex)| {
+            mutex.as_ref().and_then(|mutex| {
+                if mutex.waiting_tids().iter().any(|waiting_tid| *waiting_tid == tid) {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    fn waiting_semaphore_of(&self, tid: usize) -> Option<usize> {
+        self.semaphore_list.iter().enumerate().find_map(|(id, sem)| {
+            sem.as_ref().and_then(|sem| {
+                if sem.waiting_tids().iter().any(|waiting_tid| *waiting_tid == tid) {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    fn mutex_chain_reaches(&self, start_tid: usize, target_tid: usize) -> bool {
+        let mut current_tid = start_tid;
+        let mut visited: Vec<usize> = Vec::new();
+        loop {
+            if current_tid == target_tid {
+                return true;
+            }
+            if visited.iter().any(|visited_tid| *visited_tid == current_tid) {
+                return false;
+            }
+            visited.push(current_tid);
+            let Some(waiting_mutex_id) = self.waiting_mutex_of(current_tid) else {
+                return false;
+            };
+            let Some(owner_tid) = self.mutex_list[waiting_mutex_id]
+                .as_ref()
+                .and_then(|mutex| mutex.owner_tid())
+            else {
+                return false;
+            };
+            current_tid = owner_tid;
+        }
+    }
+
+    fn semaphore_chain_reaches(&self, start_tid: usize, target_tid: usize) -> bool {
+        let mut stack = vec![start_tid];
+        let mut visited: Vec<usize> = Vec::new();
+        while let Some(tid) = stack.pop() {
+            if tid == target_tid {
+                return true;
+            }
+            if visited.iter().any(|visited_tid| *visited_tid == tid) {
+                continue;
+            }
+            visited.push(tid);
+            let Some(waiting_sem_id) = self.waiting_semaphore_of(tid) else {
+                continue;
+            };
+            if let Some(sem) = &self.semaphore_list[waiting_sem_id] {
+                for holder_tid in sem.holder_tids() {
+                    stack.push(holder_tid);
+                }
+            }
+        }
+        false
+    }
+
+    fn mutex_deadlock_on_request(&self, current_tid: usize, mutex_id: usize) -> bool {
+        let Some(mutex) = self.mutex_list.get(mutex_id).and_then(|mutex| mutex.as_ref()) else {
+            return false;
+        };
+        let Some(owner_tid) = mutex.owner_tid() else {
+            return false;
+        };
+        if owner_tid == current_tid {
+            return true;
+        }
+        self.mutex_chain_reaches(owner_tid, current_tid)
+    }
+
+    fn semaphore_deadlock_on_request(&self, current_tid: usize, sem_id: usize) -> bool {
+        let Some(sem) = self.semaphore_list.get(sem_id).and_then(|sem| sem.as_ref()) else {
+            return false;
+        };
+        if sem.available_count() > 0 {
+            return false;
+        }
+        let holders = sem.holder_tids();
+        if holders.iter().any(|holder_tid| *holder_tid == current_tid) {
+            return true;
+        }
+        for holder_tid in holders {
+            if self.semaphore_chain_reaches(holder_tid, current_tid) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has_mutex_deadlock(&self) -> bool {
+        for mutex in self.mutex_list.iter().flatten() {
+            let Some(owner_tid) = mutex.owner_tid() else {
+                continue;
+            };
+            for waiter_tid in mutex.waiting_tids() {
+                if owner_tid == waiter_tid || self.mutex_chain_reaches(owner_tid, waiter_tid) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn has_semaphore_deadlock(&self) -> bool {
+        for sem in self.semaphore_list.iter().flatten() {
+            let holders = sem.holder_tids();
+            if holders.is_empty() {
+                continue;
+            }
+            for waiter_tid in sem.waiting_tids() {
+                if holders.iter().any(|holder_tid| *holder_tid == waiter_tid) {
+                    return true;
+                }
+                for holder_tid in holders.iter().copied() {
+                    if self.semaphore_chain_reaches(holder_tid, waiter_tid) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 impl ProcessControlBlock {
@@ -114,6 +266,7 @@ impl ProcessControlBlock {
                         Some(Arc::new(Stdout)),
                     ],
                     signals: SignalFlags::empty(),
+                    deadlock_detect: false,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     mutex_list: Vec::new(),
@@ -175,18 +328,18 @@ impl ProcessControlBlock {
         let mut user_sp = task_inner.res.as_mut().unwrap().ustack_top();
         user_sp -= (args.len() + 1) * core::mem::size_of::<usize>();
         let argv_base = user_sp;
-        let mut argv: Vec<_> = (0..=args.len())
-            .map(|arg| {
-                translated_refmut(
-                    new_token,
-                    (argv_base + arg * core::mem::size_of::<usize>()) as *mut usize,
-                )
-            })
-            .collect();
-        *argv[args.len()] = 0;
+        write_user_value(
+            new_token,
+            (argv_base + args.len() * core::mem::size_of::<usize>()) as *mut usize,
+            &0usize,
+        );
         for i in 0..args.len() {
             user_sp -= args[i].len() + 1;
-            *argv[i] = user_sp;
+            write_user_value(
+                new_token,
+                (argv_base + i * core::mem::size_of::<usize>()) as *mut usize,
+                &user_sp,
+            );
             let mut p = user_sp;
             for c in args[i].as_bytes() {
                 *translated_refmut(new_token, p as *mut u8) = *c;
@@ -240,6 +393,7 @@ impl ProcessControlBlock {
                     exit_code: 0,
                     fd_table: new_fd_table,
                     signals: SignalFlags::empty(),
+                    deadlock_detect: parent.deadlock_detect,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     mutex_list: Vec::new(),
@@ -281,5 +435,33 @@ impl ProcessControlBlock {
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    /// Check whether deadlock detection is enabled for this process.
+    pub fn deadlock_detect_enabled(&self) -> bool {
+        self.inner_exclusive_access().deadlock_detect
+    }
+
+    /// Enable or disable deadlock detection for this process.
+    pub fn set_deadlock_detect(&self, enabled: bool) {
+        self.inner_exclusive_access().deadlock_detect = enabled;
+    }
+
+    /// Check whether the requested mutex lock would deadlock.
+    pub fn mutex_deadlock_on_request(&self, current_tid: usize, mutex_id: usize) -> bool {
+        self.inner_exclusive_access()
+            .mutex_deadlock_on_request(current_tid, mutex_id)
+    }
+
+    /// Check whether the requested semaphore down would deadlock.
+    pub fn semaphore_deadlock_on_request(&self, current_tid: usize, sem_id: usize) -> bool {
+        self.inner_exclusive_access()
+            .semaphore_deadlock_on_request(current_tid, sem_id)
+    }
+
+    /// Check whether the current mutex/semaphore state already contains a deadlock.
+    pub fn has_deadlock(&self) -> bool {
+        let inner = self.inner_exclusive_access();
+        inner.has_mutex_deadlock() || inner.has_semaphore_deadlock()
     }
 }

@@ -10,6 +10,38 @@
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
 
+use crate::mm::translated_byte_buffer;
+
+/// Read a plain value from user memory, even if it spans pages.
+pub(super) fn read_user_value<T: Copy>(token: usize, src: *const T) -> T {
+    let size = core::mem::size_of::<T>();
+    let mut user_buf = translated_byte_buffer(token, src as *const u8, size);
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+    let dst = unsafe { core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, size) };
+    let mut offset = 0usize;
+    for slice in user_buf.iter_mut() {
+        let len = slice.len();
+        dst[offset..offset + len].copy_from_slice(slice);
+        offset += len;
+    }
+    assert_eq!(offset, size);
+    unsafe { value.assume_init() }
+}
+
+/// Write a plain value into user memory, even if it spans pages.
+pub(super) fn write_user_value<T>(token: usize, dst: *mut T, value: &T) {
+    let size = core::mem::size_of::<T>();
+    let src = unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size) };
+    let mut user_buf = translated_byte_buffer(token, dst as *const u8, size);
+    let mut offset = 0usize;
+    for slice in user_buf.iter_mut() {
+        let len = slice.len();
+        slice.copy_from_slice(&src[offset..offset + len]);
+        offset += len;
+    }
+    assert_eq!(offset, size);
+}
+
 /// openat syscall
 pub const SYSCALL_OPENAT: usize = 56;
 /// close syscall

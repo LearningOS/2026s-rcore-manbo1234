@@ -40,7 +40,7 @@ impl TaskManager {
             .enumerate()
             .find(|(_, t)| Arc::as_ptr(t) == Arc::as_ptr(&task))
         {
-            self.ready_queue.remove(id);
+            let _ = self.ready_queue.remove(id);
         }
     }
     /// Add a task to stopping task

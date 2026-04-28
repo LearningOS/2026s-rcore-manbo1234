@@ -7,10 +7,10 @@ use alloc::{collections::VecDeque, sync::Arc};
 /// Condition variable structure
 pub struct Condvar {
     /// Condition variable inner
-    pub inner: UPSafeCell<CondvarInner>,
+    inner: UPSafeCell<CondvarInner>,
 }
 
-pub struct CondvarInner {
+struct CondvarInner {
     pub wait_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 

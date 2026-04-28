@@ -2,6 +2,7 @@ use super::File;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
 use alloc::sync::{Arc, Weak};
+use core::any::Any;
 
 use crate::task::suspend_current_and_run_next;
 
@@ -175,5 +176,8 @@ impl File for Pipe {
                 }
             }
         }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

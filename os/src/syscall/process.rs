@@ -1,12 +1,14 @@
 use crate::{
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{translated_byte_buffer, translated_str},
+    timer::get_time_us,
     task::{
         current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
         suspend_current_and_run_next, SignalFlags,
     },
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
+use super::{read_user_value, write_user_value};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -64,11 +66,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         "kernel:pid[{}] sys_exec",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
+    if path.is_null() || args.is_null() {
+        return -1;
+    }
     let token = current_user_token();
     let path = translated_str(token, path);
     let mut args_vec: Vec<String> = Vec::new();
     loop {
-        let arg_str_ptr = *translated_ref(token, args);
+        let arg_str_ptr = read_user_value(token, args);
         if arg_str_ptr == 0 {
             break;
         }
@@ -95,6 +100,9 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     //trace!("kernel: sys_waitpid");
+    if exit_code_ptr.is_null() {
+        return -1;
+    }
     let process = current_process();
     // find a child process
 
@@ -120,7 +128,7 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         // ++++ temporarily access child PCB exclusively
         let exit_code = child.inner_exclusive_access().exit_code;
         // ++++ release child PCB
-        *translated_refmut(inner.memory_set.token(), exit_code_ptr) = exit_code;
+        write_user_value(inner.memory_set.token(), exit_code_ptr, &exit_code);
         found_pid as isize
     } else {
         -2
@@ -151,12 +159,38 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_get_time",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    if ts.is_null() {
+        return -1;
+    }
+    let time_us = get_time_us();
+    let timeval = TimeVal {
+        sec: time_us / 1_000_000,
+        usec: time_us % 1_000_000,
+    };
+    let token = current_user_token();
+    let mut user_buf = translated_byte_buffer(
+        token,
+        ts as *const u8,
+        core::mem::size_of::<TimeVal>(),
+    );
+    let time_bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&timeval as *const TimeVal) as *const u8,
+            core::mem::size_of::<TimeVal>(),
+        )
+    };
+    let mut offset = 0usize;
+    for slice in user_buf.iter_mut() {
+        let len = slice.len();
+        slice.copy_from_slice(&time_bytes[offset..offset + len]);
+        offset += len;
+    }
+    0
 }
 
 /// mmap syscall
