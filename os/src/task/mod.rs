@@ -54,6 +54,7 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_times: [0; task::MAX_SYSCALL_NUM],
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -135,6 +136,20 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Record one syscall for the current task.
+    fn record_current_syscall(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].record_syscall(syscall_id);
+    }
+
+    /// Query syscall count of the current task.
+    fn current_syscall_times(&self, syscall_id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times(syscall_id)
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +183,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Record one syscall for the current running task.
+pub fn record_current_syscall(syscall_id: usize) {
+    TASK_MANAGER.record_current_syscall(syscall_id);
+}
+
+/// Query how many times the current task has invoked the given syscall.
+pub fn current_syscall_times(syscall_id: usize) -> isize {
+    TASK_MANAGER.current_syscall_times(syscall_id)
 }
