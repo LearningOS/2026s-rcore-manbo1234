@@ -234,15 +234,18 @@ impl TaskControlBlock {
         self.pid.0
     }
 
+    /// Get the current accumulated stride of the task.
     pub fn get_stride(&self) -> usize {
         self.inner_exclusive_access().stride
     }
 
+    /// Advance the task stride by one scheduling pass.
     pub fn advance_stride(&self) {
         let mut inner = self.inner_exclusive_access();
         inner.stride = inner.stride.wrapping_add(inner.pass);
     }
 
+    /// Update the task priority and its derived scheduling pass.
     pub fn set_priority(&self, priority: usize) {
         let mut inner = self.inner_exclusive_access();
         inner.priority = priority;
