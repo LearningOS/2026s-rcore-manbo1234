@@ -9,6 +9,14 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
+const DEFAULT_PRIORITY: usize = 16;
+const BIG_STRIDE: usize = 65536;
+
+fn pass_from_priority(priority: usize) -> usize {
+    let pass = BIG_STRIDE / priority;
+    pass.max(1)
+}
+
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -68,6 +76,15 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Task priority used by stride scheduling
+    pub priority: usize,
+
+    /// Current accumulated stride
+    pub stride: usize,
+
+    /// Stride increment after each scheduling decision
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +135,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: DEFAULT_PRIORITY,
+                    stride: 0,
+                    pass: pass_from_priority(DEFAULT_PRIORITY),
                 })
             },
         };
@@ -191,6 +211,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
                 })
             },
         });
@@ -209,6 +232,21 @@ impl TaskControlBlock {
     /// get pid of process
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    pub fn get_stride(&self) -> usize {
+        self.inner_exclusive_access().stride
+    }
+
+    pub fn advance_stride(&self) {
+        let mut inner = self.inner_exclusive_access();
+        inner.stride = inner.stride.wrapping_add(inner.pass);
+    }
+
+    pub fn set_priority(&self, priority: usize) {
+        let mut inner = self.inner_exclusive_access();
+        inner.priority = priority;
+        inner.pass = pass_from_priority(priority);
     }
 
     /// change the location of the program break. return None if failed.
