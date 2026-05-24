@@ -97,7 +97,9 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         // ++++ temporarily access child PCB exclusively
         let exit_code = child.inner_exclusive_access().exit_code;
         // ++++ release child PCB
-        *translated_refmut(inner.memory_set.token(), exit_code_ptr) = exit_code;
+        if !exit_code_ptr.is_null() {
+            *translated_refmut(inner.memory_set.token(), exit_code_ptr) = exit_code;
+        }
         found_pid as isize
     } else {
         -2
@@ -141,12 +143,15 @@ pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
         Some(end) => end,
         None => return -1,
     };
-    if len == 0 || !start_va.aligned() || end > TRAP_CONTEXT_BASE {
+    if !start_va.aligned() || end > TRAP_CONTEXT_BASE {
         return -1;
     }
 
     if port & !0x7 != 0 || port & 0x7 == 0 {
         return -1;
+    }
+    if len == 0 {
+        return 0;
     }
     let port = port & 0x7;
     let mut map_perm = MapPermission::U;
@@ -185,22 +190,23 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
         Some(end) => end,
         None => return -1,
     };
-    if len == 0 || !start_va.aligned() || end > TRAP_CONTEXT_BASE {
+    if !start_va.aligned() || end > TRAP_CONTEXT_BASE {
         return -1;
+    }
+    if len == 0 {
+        return 0;
     }
 
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-    let start_vpn = start_va.floor().0;
-    let end_vpn = VirtAddr::from(end).ceil().0;
-    for vpn in start_vpn..end_vpn {
-        if inner.memory_set.translate(vpn.into()).is_none() {
-            return -1;
-        }
+    let start_vpn = start_va.floor();
+    let end_vpn = VirtAddr::from(end).ceil();
+    if !inner.memory_set.contains_area(start_vpn, end_vpn) {
+        return -1;
     }
 
-    inner.memory_set.remove_area_with_start_vpn(start_va.into());
-    for vpn in start_vpn..end_vpn {
+    inner.memory_set.remove_area_with_start_vpn(start_vpn);
+    for vpn in start_vpn.0..end_vpn.0 {
         if inner.memory_set.translate(vpn.into()).is_some() {
             return -1;
         }
