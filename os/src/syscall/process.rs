@@ -199,14 +199,16 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
 
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-    let start_vpn = start_va.floor();
-    let end_vpn = VirtAddr::from(end).ceil();
-    if !inner.memory_set.contains_area(start_vpn, end_vpn) {
-        return -1;
+    let start_vpn = start_va.floor().0;
+    let end_vpn = VirtAddr::from(end).ceil().0;
+    for vpn in start_vpn..end_vpn {
+        if inner.memory_set.translate(vpn.into()).is_none() {
+            return -1;
+        }
     }
 
-    inner.memory_set.remove_area_with_start_vpn(start_vpn);
-    for vpn in start_vpn.0..end_vpn.0 {
+    inner.memory_set.remove_area_with_start_vpn(start_va.into());
+    for vpn in start_vpn..end_vpn {
         if inner.memory_set.translate(vpn.into()).is_some() {
             return -1;
         }
